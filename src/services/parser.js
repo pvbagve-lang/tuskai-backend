@@ -469,7 +469,15 @@ function parseStructuredSpec(text) {
     if (META_LN.test(line)) continue
     if (SKIP_LN.test(line)) continue
 
-    // Section header (non-question group names)
+    // Section header — check BEFORE question content (even if curQ is active)
+    if (SEC_LN.test(line) && !Q_HDR.test(line)) {
+      if (curQ) { curSec.questions.push(curQ); curQ = null }
+      if (curSec.questions.length > 0) sections.push(curSec)
+      curSec = { name: line, questions: [], routing: [] }
+      continue
+    }
+
+    // Question header: Q: Title (Q1)
     const qhdr = Q_HDR.exec(line)
     if (qhdr) {
       if (curQ) { curSec.questions.push(curQ); curQ = null }
@@ -511,10 +519,8 @@ function parseStructuredSpec(text) {
       if (!curQ.text && line.length > 10 && !SKIP_LN.test(line) && !TYPE_LN.test(line)) {
         curQ.text = line
       }
-    } else if (SEC_LN.test(line) && !Q_HDR.test(line)) {
-      // Section name
-      if (curSec.questions.length > 0) sections.push(curSec)
-      curSec = { name: line, questions: [], routing: [] }
+    } else {
+      // Not inside a question — skip non-question lines
     }
   }
 
@@ -628,11 +634,8 @@ async function extractTextFromFile(buffer, filename) {
 
   if (ext === 'pdf') {
     try {
-      // direct import used instead
-      // (mammoth imported at top)
-      // Try pdf-parse if available
-      const pdf    = req('pdf-parse')
-      const result = await pdf(buffer)
+      const { default: pdfParse } = await import('pdf-parse')
+      const result = await pdfParse(buffer)
       return { text: result.text, pages: result.numpages, method: 'pdf-parse' }
     } catch(e) {
       return { text: buffer.toString('latin1').replace(/[^\x20-\x7E\n\r\t]/g, ' '), pages: 1, method: 'raw-pdf', warning: 'pdf-parse not installed' }
@@ -641,9 +644,7 @@ async function extractTextFromFile(buffer, filename) {
 
   if (ext === 'xlsx' || ext === 'xls') {
     try {
-      // direct import used instead
-      // (imported at top)
-      const XLSX = req('xlsx')
+      const { default: XLSX } = await import('xlsx')
       const wb   = XLSX.read(buffer, { type: 'buffer' })
       const lines = []
       wb.SheetNames.forEach(name => {
