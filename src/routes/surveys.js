@@ -146,6 +146,7 @@ router.post('/build', requireCredits, async (req, res) => {
         const routing = q._srcRouting || []
         for (const rule of routing) {
           const clean = rule.replace(/^-\s+/, '').trim()
+          // Audience-based display logic (Dallah-style)
           const audienceMatch = clean.match(/(?:DISPLAY_IF:\s*|SHOW\s+(?:ONLY\s+)?TO\s+)(.+)/i) ||
                                 clean.match(/(?:ONLY\s+(?:FOR|TO)\s+)(.+)/i)
           if (audienceMatch && respTypeQid) {
@@ -160,10 +161,14 @@ router.post('/build', requireCredits, async (req, res) => {
         }
       }
     }
+
+    // ── Apply SHOW IF display logic (from structured-spec format) ──
+    try { structure = applyShowIfToStructure(structure) } catch(e) { console.warn('applyShowIf:', e.message) }
+
+    // Clean _srcRouting AFTER applyShowIfToStructure has used it
     structure.blocks.forEach(b => b.questions?.forEach(q => delete q._srcRouting))
 
     // ── STEP 3: Build QSF ──
-    try { structure = applyShowIfToStructure(structure) } catch(e) {}
     if (flowOutline?.length > 0) {
       try {
         const blockDescMap = {}; structure.blocks.forEach(b => { blockDescMap[b.description] = b.id })
