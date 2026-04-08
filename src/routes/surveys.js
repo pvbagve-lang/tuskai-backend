@@ -168,6 +168,60 @@ router.post('/build', requireCredits, async (req, res) => {
     // Clean _srcRouting AFTER applyShowIfToStructure has used it
     structure.blocks.forEach(b => b.questions?.forEach(q => delete q._srcRouting))
 
+    // ── Apply AI-extracted rules to structure ──
+    const aiRules = logicMap?.rules || []
+    let aiAppliedCount = 0
+    if (aiRules.length > 0) {
+      // Build QID lookup: tag → QID (e.g., "S.3" → "QID3")
+      const aiQidMap = {}
+      structure.blocks.forEach(b => b.questions?.forEach(q => {
+        if (q.dataExportTag) { aiQidMap[q.dataExportTag] = q.id; aiQidMap[q.dataExportTag.toLowerCase()] = q.id; aiQidMap[q.dataExportTag.toUpperCase()] = q.id }
+      }))
+      // Also use the AI's own qidMap
+      if (logicMap.qidMap) Object.entries(logicMap.qidMap).forEach(([tag, qid]) => { aiQidMap[tag] = qid; aiQidMap[tag.toLowerCase()] = qid })
+
+      for (const rule of aiRules) {
+        const srcQid = aiQidMap[rule.sourceQuestion] || aiQidMap[rule.sourceQID] || rule.sourceQID || rule.sourceQuestion
+        const tgtQid = aiQidMap[rule.action?.targetQuestion] || aiQidMap[rule.action?.targetQID] || rule.action?.targetQID
+
+        if (rule.type === 'DisplayLogic' && tgtQid) {
+          // Find target question and add displayLogic
+          for (const b of structure.blocks) {
+            for (const q of (b.questions || [])) {
+              if (q.id === tgtQid || q.dataExportTag === rule.action?.targetQuestion) {
+                q.displayLogic = q.displayLogic || { conditions: [] }
+                const exists = q.displayLogic.conditions.some(c => c.questionId === srcQid && c.choiceText === rule.condition?.choiceText)
+                if (!exists) {
+                  q.displayLogic.conditions.push({
+                    questionId: srcQid, choiceIndex: rule.condition?.choiceIndex || 1,
+                    choiceText: rule.condition?.choiceText || '', operator: rule.condition?.operator || 'Selected', connector: 'And'
+                  })
+                  aiAppliedCount++
+                }
+              }
+            }
+          }
+        } else if ((rule.type === 'SkipLogic' || rule.type === 'EndSurvey') && srcQid) {
+          // Find source question and add skipLogic terminate
+          for (const b of structure.blocks) {
+            for (const q of (b.questions || [])) {
+              if (q.id === srcQid || q.dataExportTag === rule.sourceQuestion) {
+                q.skipLogic = q.skipLogic || { rules: [] }
+                const exists = q.skipLogic.rules.some(r => r.choiceText === rule.condition?.choiceText)
+                if (!exists) {
+                  q.skipLogic.rules.push({
+                    choiceIndex: rule.condition?.choiceIndex || 1, choiceText: rule.condition?.choiceText || '',
+                    operator: rule.condition?.operator || 'Selected', destination: 'EndOfSurvey', destinationType: 'EndOfSurvey'
+                  })
+                  aiAppliedCount++
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
     // ── STEP 3: Build QSF ──
     if (flowOutline?.length > 0) {
       try {
@@ -214,6 +268,7 @@ router.post('/build', requireCredits, async (req, res) => {
       ai: {
         model: 'claude-haiku-4-5-20251001',
         rulesExtracted: logicMap?.rules?.length || 0,
+        rulesApplied: aiAppliedCount,
       },
       groundingScore: groundingReport?.score || null,
     }
