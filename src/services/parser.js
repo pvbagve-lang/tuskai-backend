@@ -265,6 +265,17 @@ function splitOrParts(expr) {
 function parseShowIf(expr, qidLookup) {
   const parts      = splitOrParts(expr.trim())
   const conditions = []
+  
+  // Build case-insensitive lookup
+  const ciLookup = {}
+  if (qidLookup) {
+    for (const [k, v] of Object.entries(qidLookup)) {
+      ciLookup[k] = v
+      ciLookup[k.toLowerCase()] = v
+      ciLookup[k.toUpperCase()] = v
+    }
+  }
+  const resolveQid = (raw) => ciLookup[raw] || ciLookup[raw.toLowerCase()] || ciLookup[raw.toUpperCase()] || raw
 
   parts.forEach((part, i) => {
     const connector = i < parts.length - 1 ? 'Or' : 'And'
@@ -273,7 +284,7 @@ function parseShowIf(expr, qidLookup) {
     // selected(Qn, 'value') or not_selected(Qn, 'value')
     let m = /^(not_selected|selected)\(([A-Za-z0-9_]+),\s*['"](.+?)['"]\)$/i.exec(part)
     if (m) {
-      const qid = qidLookup[m[2]] || m[2]
+      const qid = resolveQid(m[2])
       conditions.push({ questionId: qid, choiceText: m[3],
         operator: m[1].toLowerCase() === 'selected' ? 'Selected' : 'NotSelected',
         logicType: 'Question', connector })
@@ -283,7 +294,7 @@ function parseShowIf(expr, qidLookup) {
     // displayed(Qn)
     m = /^displayed\(([A-Za-z0-9_]+)\)$/i.exec(part)
     if (m) {
-      const qid = qidLookup[m[1]] || m[1]
+      const qid = resolveQid(m[1])
       conditions.push({ questionId: qid, operator: 'Displayed', logicType: 'Question', connector })
       return
     }
@@ -293,7 +304,7 @@ function parseShowIf(expr, qidLookup) {
     if (m) {
       const opMap = { greater_than:'GreaterThan', less_than:'LessThan',
         greater_than_or_equal:'GreaterThanOrEqual', less_than_or_equal:'LessThanOrEqual', equal_to:'EqualTo' }
-      const qid = qidLookup[m[2]] || m[2]
+      const qid = resolveQid(m[2])
       conditions.push({ questionId: qid, operator: opMap[m[1].toLowerCase()] || 'GreaterThan',
         value: m[3].trim().replace(/['"]/g,''), logicType: 'Question', connector })
       return
@@ -303,8 +314,8 @@ function parseShowIf(expr, qidLookup) {
     m = /^([a-zA-Z_][a-zA-Z0-9_]*)\s*(==|!=)\s*['"](.+?)['"]$/.exec(part)
     if (m) {
       const op = m[2] === '==' ? 'EqualTo' : 'NotEqualTo'
-      if (qidLookup[m[1]]) {
-        conditions.push({ questionId: qidLookup[m[1]], choiceText: m[3], operator: op, logicType: 'Question', connector })
+      if (resolveQid(m[1]) !== m[1]) {
+        conditions.push({ questionId: resolveQid(m[1]), choiceText: m[3], operator: op, logicType: 'Question', connector })
       } else {
         conditions.push({ field: m[1], value: m[3], operator: op, logicType: 'EmbeddedField', connector })
       }
@@ -314,8 +325,8 @@ function parseShowIf(expr, qidLookup) {
     // contains(field, 'value')
     m = /^contains\(([A-Za-z0-9_]+),\s*['"](.+?)['"]\)$/i.exec(part)
     if (m) {
-      if (qidLookup[m[1]]) {
-        conditions.push({ questionId: qidLookup[m[1]], choiceText: m[2], operator: 'Selected', logicType: 'Question', connector })
+      if (resolveQid(m[1]) !== m[1]) {
+        conditions.push({ questionId: resolveQid(m[1]), choiceText: m[2], operator: 'Selected', logicType: 'Question', connector })
       } else {
         conditions.push({ field: m[1], value: m[2], operator: 'Contains', logicType: 'EmbeddedField', connector })
       }
