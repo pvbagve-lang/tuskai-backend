@@ -65,38 +65,104 @@ router.post('/extract-logic', async (req, res) => {
   if (!fileText) return res.status(400).json({ error: 'No file text provided' })
   const apiKey = req.headers['x-api-key'] || process.env.ANTHROPIC_API_KEY
 
-  const system = `You are a survey routing logic analyst. Extract every routing instruction from the questionnaire into structured JSON. Return ONLY valid JSON — no markdown fences, no explanation.`
-  const prompt = `Analyze this questionnaire. Extract ALL routing logic and build the QID anchor map.
+  // Smart compression: keep routing-relevant lines, trim metadata
+  const lines = fileText.split('\n')
+  const important = []
+  const contextLines = []
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i].trim()
+    if (!l) continue
+    const isRouting = /TERMINATE|SHOW IF|DISPLAY_IF|ONLY FOR|SKIP|branch|end_survey|selected\(|not_selected|displayed\(|PROGRAM INST/i.test(l)
+    const isQuestion = /^Q[:\s]|^\d+\.\s|^[A-Z]\.\d|MULTIPLE CHOICE|TEXT ENTRY|MATRIX|SAVR|MAVR|^id:\s/i.test(l)
+    const isSection = /^(?:Demographics|Introduction|Screener|Block|Section|FLOW|flow:)/i.test(l)
+    if (isRouting || isQuestion || isSection) {
+      important.push(l)
+    } else if (important.length < 400) {
+      contextLines.push(l)
+    }
+  }
+  // Build compressed text: all important lines + enough context
+  let compressedText = important.join('\n')
+  if (compressedText.length < 20000) {
+    compressedText = fileText.slice(0, 25000) // Use more raw text if routing lines are sparse
+  }
 
-Return ONLY this exact JSON:
+  const system = `You are a survey routing logic analyst for market research questionnaires. Extract every routing instruction. Look for: TERMINATE markers, SHOW IF conditions, DISPLAY_IF, "ONLY FOR [audience]", PROGRAM INSTRUCTIONS with skip/terminate, branch→end_survey in flow outlines, and question-level routing. Return ONLY valid JSON — no markdown, no backticks, no explanation before or after the JSON.`
+  const prompt = `Extract ALL routing logic from this questionnaire.
+
+Return this JSON structure:
 {
-  "qidMap": { "Q1": "QID1" },
-  "rules": [{"ruleId":"R1","type":"DisplayLogic|SkipLogic|BranchLogic|EndSurvey","sourceQuestion":"Q2","sourceQID":"QID2","condition":{"operator":"Selected","choiceText":"Yes","choiceIndex":1},"action":{"type":"ShowQuestion","targetQuestion":"Q5","targetQID":"QID5"},"verbatimInstruction":"exact text","confidence":"High|Medium|Low","notes":""}],
-  "sections": [{"name":"Section 2","questions":["Q4"],"showCondition":null}],
+  "qidMap": { "Q1": "QID1", "S.1": "QID1" },
+  "rules": [
+    {
+      "ruleId": "R1",
+      "type": "DisplayLogic",
+      "sourceQuestion": "S.1",
+      "sourceQID": "QID1",
+      "condition": { "operator": "Selected", "choiceText": "Patient", "choiceIndex": 1 },
+      "action": { "type": "ShowQuestion", "targetQuestion": "S.3", "targetQID": "QID3" },
+      "verbatimInstruction": "ONLY FOR PATIENTS",
+      "confidence": "High",
+      "notes": ""
+    },
+    {
+      "ruleId": "R2",
+      "type": "EndSurvey",
+      "sourceQuestion": "S.3",
+      "sourceQID": "QID3",
+      "condition": { "operator": "Selected", "choiceText": "No", "choiceIndex": 2 },
+      "action": { "type": "EndSurvey" },
+      "verbatimInstruction": "TERMINATE IF CODED 02 IN S.3",
+      "confidence": "High",
+      "notes": ""
+    }
+  ],
+  "sections": [],
   "ambiguities": []
 }
 
+Types: DisplayLogic (show question if condition), SkipLogic (skip to question), EndSurvey (terminate), BranchLogic (conditional block).
+Operators: Selected, NotSelected, Displayed, EqualTo, GreaterThan.
+
 File: ${fileName}
 ---
-${fileText.slice(0, 15000)}`
+${compressedText.slice(0, 25000)}`
 
   try {
-    const { text: raw, tokens } = await callClaude(apiKey, system, prompt, 4096)
-    const clean = raw.replace(/```json|```/g,'').trim()
+    const { text: raw, tokens } = await callClaude(apiKey, system, prompt, 8192)
+    // Clean response: strip markdown fences, find JSON object
+    let clean = raw.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim()
+    // Try to extract JSON object if there's text before/after it
+    const jsonStart = clean.indexOf('{')
+    const jsonEnd = clean.lastIndexOf('}')
+    if (jsonStart >= 0 && jsonEnd > jsonStart) {
+      clean = clean.slice(jsonStart, jsonEnd + 1)
+    }
     let logicMap
+    let parseError = null
     try { logicMap = JSON.parse(clean) }
-    catch { logicMap = { qidMap:{}, rules:[], sections:[], ambiguities:[] } }
+    catch(pe) {
+      parseError = pe.message
+      logicMap = { qidMap:{}, rules:[], sections:[], ambiguities:[] }
+    }
 
     // Log usage (no credit consumed for extraction)
     if (req.dbUser?.id) {
       await pool.query('INSERT INTO usage_log (user_id, action, tokens, meta) VALUES ($1,$2,$3,$4)',
-        [req.dbUser.id, 'extract_logic', tokens, JSON.stringify({ fileName })]).catch(()=>{})
+        [req.dbUser.id, 'extract_logic', tokens, JSON.stringify({ fileName, rulesFound: logicMap?.rules?.length || 0, parseError })]).catch(()=>{})
       await pool.query('UPDATE users SET tokens_used = tokens_used + $1 WHERE id = $2', [tokens, req.dbUser.id]).catch(()=>{})
     }
 
-    res.json({ logicMap, aiStats: { model: 'claude-haiku-4-5-20251001', tokens, rulesExtracted: logicMap?.rules?.length || 0, connected: true } })
+    res.json({
+      logicMap,
+      aiStats: { model: 'claude-haiku-4-5-20251001', tokens, rulesExtracted: logicMap?.rules?.length || 0, connected: true, parseError }
+    })
   } catch(e) {
-    res.status(500).json({ error: e.message })
+    // API call itself failed — return empty but with error info
+    res.json({
+      logicMap: { qidMap:{}, rules:[], sections:[], ambiguities:[] },
+      aiStats: { model: 'claude-haiku-4-5-20251001', tokens: 0, rulesExtracted: 0, connected: false, error: e.message }
+    })
   }
 })
 
