@@ -872,9 +872,15 @@ function buildBranch(f, fid, bidMap) {
   const c        = f.condition || {};
   const operator = c.operator || 'Selected';
   const loc      = 'q://' + c.questionId + '/SelectableChoice/' + (c.choiceIndex || 1);
-  const flowItems = (f.flow || [])
-    .filter(fb => fb && fb.id && (bidMap[fb.id] || fb.id))
-    .map(fb => ({ Type: 'Standard', ID: bidMap[fb.id] || fb.id, FlowID: fid(), Autofill: [] }));
+  const flowItems = (f.flow || []).map(fb => {
+    if (fb.type === 'EndSurvey') {
+      return { Type: 'EndSurvey', FlowID: fid() };
+    }
+    if (fb.id && (bidMap[fb.id] || fb.id)) {
+      return { Type: 'Standard', ID: bidMap[fb.id] || fb.id, FlowID: fid(), Autofill: [] };
+    }
+    return null;
+  }).filter(Boolean);
 
   // Don't emit branches with empty Flow — they break Qualtrics import
   if (flowItems.length === 0) return null;
@@ -894,7 +900,7 @@ function buildBranch(f, fid, bidMap) {
           QuestionIDFromLocator: c.questionId,
           LeftOperand:           loc,
           Type:                  'Expression',
-          Description:           (c.questionId + ' ' + (c.operator || '') + ' ' + (c.choiceText || '')).trim()
+          Description:           `<span class="ConjDesc">If</span> <span class="QuestionDesc">${c.questionId}</span> <span class="LeftOpDesc">${c.choiceText||''}</span> <span class="OpDesc">Is ${operator}</span> `
         },
         Type: 'If'
       },
